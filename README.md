@@ -26,4 +26,4 @@ Prediction accuracy and calculation time comparison. Prediction errors analysis.
 | report.R              | Source code of the analysis, the building of predictive systems, and the RMSE tests of the predicted vectors |
 | htru2.Rds             | HTRU2 data set in RDS format |
 | correlationMatrix.png | The data set correlation matrix size 9x9. Exported gg object. |
-| errors3d.png          | The classification errors on |
+| errors3d.png          | The classification errors. Exported image. |
