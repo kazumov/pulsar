@@ -27,6 +27,7 @@ vignettes/*.pdf
 # knitr and R markdown default cache directories
 /*_cache/
 /cache/
+/report_files/
 
 # Temporary files created by R markdown
 *.utf8.md
@@ -34,3 +35,10 @@ vignettes/*.pdf
 
 # Shiny token, see https://shiny.rstudio.com/articles/shinyapps.html
 rsconnect/
+
+# project file
+pulsar.Rproj
+
+# log files
+*.log
+

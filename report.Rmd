@@ -1,0 +1,498 @@
+---
+title: "Pulsar prediction with HTRU2 data set"
+author: "Ruben R. Kazumov"
+date: "6/6/2019"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 1
+header-includes:
+  - \usepackage{epigraph}
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(knitr)
+library(latex2exp)
+stars = readRDS(file = "htru2.Rds")
+knitr::opts_chunk$set(echo = FALSE, 
+                      stars = stars)
+```
+
+# Acronyms, variables and abbreviations
+
+DM - Dispersion measure
+
+SNR - Signal-to-noise ratio
+
+RFI - radio frequency interference
+
+LOFAR - low frequency array
+
+FAST - Five hundred metre Aperture Spherical Telescope
+
+SKA - Square Kilometre Array
+
+ALFA - Arecibo L-band Feed Array
+
+ANN - artificial neural network
+
+PMPS - Parkes multi-beam pulsar survey
+
+HTRU2 - High Time Resolution Universe Survey. Name of the data set. Collection of pulsar candidates.
+
+P - Pulsar (in legend)
+
+NP - Not a pulsar (in legend)
+
+${\mu}$ - Mean
+
+${\sigma}$ - Standard deviation
+
+${K}$ - Excess kurtosis
+
+${S}$ - Skewness
+
+
+
+
+\epigraph{Listen! \\
+If stars are lit \\
+It means there is someone who needs it,\\
+It means someone wants them to be,\\
+That someone deems those specks of spit\\
+Magnificent!}{\textit{--- Vladimir Mayakovsky, Listen!}}
+
+
+# Executive summary
+
+The data set HTRU2 is a well known public data set, which has been studied with different approaches [1].
+
+Many authors attempted to improve the classification accuracy by various methods, including, but not limited to Random Forest, Generalized Linear Model,  Support Vector Machine, ANN [2].
+
+In this project, we will study the HTRU2 data set with several methods of classification, we will compare the methods of classification by accuracy of prediction, and the calculation time. We will find the errors of classification and study the reasons for these errors. We will try to understand the origins of the classification errors and will make the conclusion about the possibility to make the model more precise in general.
+
+Also, we will overview the concept of feature selection as the original events derivative.
+
+
+
+# The data set
+
+The data set HTRU2 is a collection of the pulsar candidate star observations. The features of the data set describe the parameters of continuous signal from numerous stars, perfected by station. The original set has nine features which are listed in Table \ref{tab:listOfFeatures}.
+
+```{r}
+readRDS("listOfFeatures.Rds") %>% 
+  kable(caption = paste(
+    "\\label{tab:listOfFeatures}",
+    "List of features in HTRU2 data set"))
+```
+
+All the features are the derivatives of two pre-processed objects:
+
+1. Integrated profile of the star, and
+2. Dispersion measure signal-to-noise ratio (DM-SNR) curve [3][4].
+
+## Integrated profile
+
+The integrated profile feature group, describes the shape of the radio signals from the stars, intercepted by stations. The signals intercepted by stations, like LOFAR, SKA, ALFA etc. are passed through multiple pre-processing procedures and folded into the "integrated profile" of a star [5][6][7]. 
+
+The integrated profile describes the change of the shape and magnitude of impulse-like radio-signal series from the star. Integrated profile statistically describes the history of the star signals.
+
+The statistical description in the form of mean ($Prof_{\mu}$), standard deviation ($Prof_{\sigma}$), excess kurtosis ($Prof_K$), and skewness ($Prof_S$), are expected to be similar for each of the different star classes.
+
+Since the pulsar is the sub-class of the neutron star, there expected to be similarity in the integrated profile of pulsars.
+
+
+## DM-SNR curve
+
+Signal from the star comes in the continuous radio-frequency band [8]. The speed of the signal disperses for different frequencies with the different speed. Immediately after the impulse, the station starts to receive the same signal but on a different frequency bands. It is a continuous process. The high frequency signal comes with less delay, but low frequency signal comes with more delay. Station continuously receives signals with lower and lower frequencies. It is the same signal, but cloned with the delay on different radio-frequency bands.
+
+Since the cloned signals can be described statistically, the DM-SNR curve can be described in terms of the mean ($DM_{\mu}$), standard deviation ($DM_{\sigma}$), excess kurtosis ($DM_{K}$), and skewness ($DM_{S}$), as well as integrated profile.
+
+## Class of star
+
+The feature "Class of star" is our target feature for the prediction. We will describe it as a factor with the values "pulsar" and "not a pulsar".
+
+
+# Statistical overview of the features
+
+We scale the eight features of the data set to make them visually more defined (Figure\ref{fig:featuresOverview}). One should notice, the features have distant averages, but the feature values for the different star classes are heavily overlapped for each feature. 
+
+```{r, fig.height = 8, fig.cap="\\label{fig:featuresOverview}Features overview"}
+readRDS(file = "scaledFeaturesBoxPlot.Rds")
+```
+
+One can study the features correlation matrix (Table\ref{tab:numericCorrelation}). We can split the correlation matrices for pulsars and not the pulsar classes and present them in the graphical correlation matrix (Figure\ref{fig:pairs}). The plot describes the correlation between features of the data set. The red color highlights not a pulsar stars, but the green one highlights pulsars.
+
+```{r}
+readRDS(file = "corNum.Rds") %>% 
+  kable(caption = paste("\\label{tab:numericCorrelation}",
+                        "The data features correlation."))
+```
+
+```{r, fig.width = 6.5, fig.cap = "\\label{fig:pairs}The data set correlation matrix."}
+include_graphics(path = "correlationMatrix.png")
+```
+
+One can notice the grouping of the pulsar and not a pulsar stars. Also one can see the values of correlation coefficient between the pairs.
+
+As we can see in Table \ref{tab:starClassesProportion}, the data set is heavily unbalanced. The number of `not a pulsar` observations is ten times bigger than `pulsar` ones. We can suggest, that the data set builder expected the heavy prevalence of a `not a pulsar` classes over `pulsar` ones in reality and tried to recreate this proportion.
+
+```{r}
+readRDS(file = "starClassesProportion.Rds") %>% 
+  kable(col.names = c("Count"),
+        caption = paste("\\label{tab:starClassesProportion}",
+                        "Proportion of `pulsar` and `not a pulsar` classes in the data set."))
+```
+
+However, as one may suspect, the unbalanced data may cause problems in a prediction system results. Later we will see the affect of this disproportion in confidence matrix.
+
+# Classification
+
+For the classification we split the observations into training and testing sets:
+
+```{r, eval = FALSE, echo = TRUE}
+
+n = dim(stars)[1] # total number of observations
+
+trainIdx <- sample(x = n, size = n * 0.9) # 90% of observations for the training set, and 
+                                          # 10% for the test set
+
+train <- stars[trainIdx, ]
+
+test <- stars[-trainIdx, ]
+
+summary(train$starClass) # check the content of the training set
+# > summary(train$starClass)
+# not a pulsar       pulsar 
+#        14635         1473 
+
+summary(test$starClass) # check the content of the testing set
+# > summary(test$starClass)
+# not a pulsar       pulsar 
+#         1624          166 
+
+x <- train %>% select(-starClass) 
+
+y <- train$starClass
+
+xTest <- test %>% select(-starClass)
+
+yTest <- test$starClass
+
+```
+
+As one can see, the test set consists only of $166$ observations of confirmed pulsar star class.
+
+## Quick classification with Rborist package
+
+We can try to fit the model with the Rborist algorithm. The Rborist library should show us the lower level of possible prediction. The serious advantage of Rborist library is possibility to work with the maximum observations population.
+
+```{r, echo = TRUE, eval = FALSE}
+
+fitRborist <- Rborist(x = x, y = y)
+
+```
+
+The confusion matrix of the prediction:
+
+```{r, fig.cap = "\\label{fig:confMatrisRborist}Confusion matrix of Rborist prediction."}
+readRDS(file = "confMatrixRborist.Rds")
+```
+
+One can notice the Rborist predicts star class with the overall accuracy $98\%$ for the `not a pulsar` positive.
+
+## Classification with library Random Forest
+
+We will perform the prediction with Random Forest algorithm three times:
+
+i) With default parameters;
+ii) With adjusted `ntree` parameter; and
+iii) With adjusted `ntree` and `mtry` parameter.
+
+The first run with default parameters:
+
+```{r, echo = TRUE, eval = FALSE}
+
+fitRandomForest <- randomForest(x = x, y = y)
+
+```
+
+The result of the prediction with the default train parameters: 
+
+```{r, fig.cap = "\\label{fig:confMatrisRFDefault}Confusion matrix of Random Forest prediction."}
+readRDS(file = "confMatrixRandomForestDefault.Rds")
+```
+
+### The optimization of `ntree` parameter
+
+We will optimize `ntree` by iterating the possible values from 50 to 500 by 10:
+
+```{r, echo = TRUE, eval = FALSE}
+
+ntree <- seq(from = 50, to = 500, by = 10)
+
+nTreeVariants <- lapply(ntree, function(ntree){
+  fit <- randomForest(x = x, y = y)
+  yHat <- predict(object = fit, newdata = xTest)
+  cm <- confusionMatrix(yHat, yTest)
+  return(
+    data.frame(ntree = ntree, accuracy = cm$overall["Accuracy"])
+  )
+}) %>% bind_rows()
+
+nTreeSelected <- nTreeVariants %>% 
+  group_by(ntree) %>% 
+  summarise(maxAccuracy = max(accuracy)) %>%
+  arrange(maxAccuracy) %>%
+  tail(1) %>% .$ntree
+
+```
+
+The `ntree` over `accuracy` dependency plot displays the unstable, random-like change of the accuracy parameter in interval $(0.977 \dots 0.980)$ dependent on `ntree`. We will select the minimal possible value of `ntree` with the maximum `accuracy` value (Fig. \ref{fig:nTreeVariantsPlot}). The optimal value of `ntree` highlighted by blue vertical line.
+
+```{r, fig.cap = "\\label{fig:nTreeVariantsPlot}Adjustment of `ntree` parameter."}
+readRDS(file = "nTreeVariantsPlot.Rds")
+```
+
+### The optimization of `mtry` parameter 
+
+With the defined optimal `ntree` value, we will find the optimal `mtry` paramenter:
+
+```{r, eval = FALSE, echo = TRUE}
+
+mtry <- 1:8 # possible values
+
+mtryVariants <- lapply(mtry, function(mtry){
+  fit <- randomForest(x = x, y = y)
+  yHat <- predict(object = fit, newdata = xTest, ntree = nTreeSelected, mtry = mtry)
+  cm <- confusionMatrix(yHat, yTest)
+  return(
+    data.frame(mtry = mtry, accuracy = cm$overall["Accuracy"])
+  )
+}) %>% bind_rows()
+
+mtrySelected <- mtryVariants %>% 
+  group_by(mtry) %>% 
+  summarise(maxAccuracy = max(accuracy)) %>%
+  arrange(maxAccuracy) %>%
+  tail(1) %>% .$mtry
+
+```
+
+The resulting dependency has no any noticeable trend (Fig. \ref{fig:mtryVariantsPlot}). The best `mtry` parameter is highlighted on the plot with a blue line. 
+
+```{r, fig.cap = "\\label{fig:mtryVariantsPlot}Adjustment of `mtry` parameter."}
+readRDS(file = "mtryVariantsPlot.Rds")
+```
+
+### Optimized approach
+
+Finally we will perform prediction whith Random Forest algorithm and will use the defined `ntree` and `mtry` parameters:
+
+```{r, echo=TRUE, eval=FALSE}
+
+fitRandomForestAdjusted <- randomForest(x = x, 
+                                        y = y, 
+                                        ntree = nTreeSelected, 
+                                        mtry = mtrySelected)
+
+```
+
+Now we can overview the results of optimization in confusion matrix: 
+
+```{r, fig.cap = "\\label{fig:confMatrixRandomForestAdjusted}Confusion matrix of adjusted Random Forest prediction."}
+readRDS(file = "confMatrixRandomForestAdjusted.Rds")
+```
+
+As one can see, the optimization process does not produce any sufficient accuracy improvement.
+
+## Classification with KNN
+
+Since Rborist and Random Forest have the same algorithmic roots, we will try to apply a radically different fitting method.
+
+```{r, echo = TRUE, eval = FALSE}
+
+library(caret)
+
+ct <- trainControl(method = "repeatedcv", repeats = 3)
+
+fitKnn <- train(x = x, y = y, method = "knn", trControl = ct, preProcess = c("center", "scale"), tuneLength = 20)
+
+
+```
+
+One can see, the KNN algorithm self-adjusted to minimal node (Fig. \ref{fig:fitKnnPlot}).
+
+```{r, fig.cap = "\\label{fig:fitKnnPlot}KNN method adjustment."}
+readRDS(file = "fitKnnPlot.Rds")
+```
+
+As a result, we can see the confusion matrix of KNN approach:
+
+```{r, fig.cap = "\\label{fig:confMatrixKnn}Confusion matrix of KNN prediction."}
+readRDS(file = "confMatrixKnn.Rds")
+```
+
+# Summary
+
+We performed tree types of fitting. Three methods, Rborist, Random Forrest and KNN are performing fitting with noticeble different calculation time (Table \ref{tab:benchmarkTime}), but without noticeable accuracy difference (Table \ref{tab:accuracySummary}).
+
+```{r}
+readRDS(file = "benchmarkTime.Rds") %>% 
+  kable(caption = paste("\\label{tab:benchmarkTime}",
+                        "Fitting time comparison."))
+```
+
+```{r}
+readRDS(file = "accuracySummary.Rds") %>% 
+  kable(caption = paste("\\label{tab:accuracySummary}",
+                        "Prediction accuracy comparison."))
+```
+
+Now we should notice the fact, that the accuracy cannot be improved by classification method change. 
+
+# Origin of errors
+
+We consolidate the prediction errors in table \ref{tab:errorSummary}.
+
+```{r}
+tribble(~`Classification error`, ~`Color code`, ~`Affected observations`,
+        "Pulsar was missed by the classifier.", "blue", 13,
+        "The star was mistaken for a pulsar.", "red", 26) %>%
+  kable(caption = paste("\\label{tab:errorSummary}",
+                        "Possible types of prediction error."))
+```
+
+We will structurize the error types according to the confusion matrix types and create data set `starsAndErrors`:
+
+```{r, echo = TRUE, eval = FALSE}
+
+resultLevels = c("Not a pulsar", 
+                 "Pulsar", 
+                 "The star was mistaken for a pulsar.", 
+                 "Pulsar was missed by the classifier.")
+
+
+starsAndErrors <- stars %>% 
+  mutate(result = case_when(
+  err == TRUE & starClass == "not a pulsar" ~ resultLevels[3], # it is actually not a pulsar, but we made a mistake
+  err == TRUE & starClass == "pulsar" ~ resultLevels[4], # it is actually a pulsar, but we made a mistake
+  err == FALSE & starClass == "not a pulsar" ~ resultLevels[1], # it is not a pulsar
+  err == FALSE & starClass == "pulsar" ~ resultLevels[2], # it is a pulsar
+))
+
+```
+
+As one can see, the `starsAndErrors` data set contains the vector `result` with the observation description. 
+
+Then we will visualize three of all possible pairs of features as 2D plots and will highlight the star classes with the colors, encoded by result level (see Fig. \ref{fig:profMuDmMuPlot}, Fig. \ref{fig:profSDmSPlot}, and Fig. \ref{fig:profKDmKPlot}).
+
+```{r, fig.cap = "\\label{fig:profMuDmMuPlot}Erroneous predictions on $Prof_{\\mu}$ vs. $DM_{\\mu}$ plot."}
+readRDS(file = "profMuDmMuPlot.Rds") 
+```
+
+```{r, fig.cap = "\\label{fig:profSDmSPlot}Erroneous predictions on $Prof_S$ vs. $DM_S$ plot."}
+readRDS(file = "profSDmSPlot.Rds") 
+```
+
+```{r, fig.cap = "\\label{fig:profKDmKPlot}Erroneous predictions on $Prof_K$ vs. $DM_K$ plot."}
+readRDS(file = "profKDmKPlot.Rds") 
+```
+
+As one can see, as the values of erroneous observations features are laying in the region of values of opposite star class, the classification method can not recognize the star class right.
+
+Finally, we should conclude, that the source of errors is lying in the features set only. The only way to increase the prediction accuracy is by creating the independent feature, based on unused before parameters of the percepted signal.
+
+## 3D interactive exploration
+
+We use one dimension of a plot to visualize one feature. Since we use 2D plots, we can explore no more than tree features (including color as a plot dimension). The library `plotly` introduces 3D interactive plots. Three dimensions allows us to plot four features at once. The code for the dependency $result = f(Prof_K, DM_{\mu}, Prof_{\mu})$ and $result = f(DM_K, Prof_{\mu}, DM_{\mu})$ visualization: 
+
+```{r, echo = TRUE, eval = FALSE}
+
+library(plotly)
+
+levelsColors <- c("#dddddd", "#aaaaff", "red", "blue")
+
+p3d <- plotly::plot_ly(data = starsAndErrors, 
+                       x = ~profK, 
+                       y = ~dmMu,
+                       z = ~profMu,
+                       color = ~result,
+                       colors = levelsColors,
+                       size = 1)
+
+p3d
+
+p3d <- plotly::plot_ly(data = starsAndErrors, 
+                       x = ~dmK, 
+                       y = ~profMu,
+                       z = ~dmMu,
+                       color = ~result,
+                       colors = levelsColors,
+                       size = 1)
+
+p3d
+
+```
+
+On a Figure \ref{fig:errors3D} you can see the visualization of the mentioned dependencies. 
+
+```{r, fig.height = 6, fig.cap = "\\label{fig:errors3D}Erroneous observations on $DM_\\mu, Prof_\\mu, DM_K$ and $Prof_\\mu, DM_\\mu, Prof_K$ plots."}
+include_graphics(path = "errors3d.png")
+```
+
+One can notice, the features values of the erroneously classified stars are deep into the values of the opposite class of stars. That is the only reason of mistake in the classification process. That is the reason, why the different classification algorithms do not sufficiently improve the results of classification.
+
+# Conclusion
+
+The machine learning methods allow us to classify different types of the objects with the ultimate precision. The recognition of the pulsar stars is one of the applications of the broadly accepted algorithms.
+
+The ultimate condition of achieving the absolute precision goal is the ability to define features with grouped values.
+
+The inability to separate the values of features into the groups creates the classification mistakes. In this case, the application of the different classification algorithms does not improve the quality of results.
+
+In this project we achieved very impressive quality of results with fairly simple classification methods, we studied all the classification mistakes and achieved understanding of the errors origin.
+
+# References
+
+1. [HTRU2 Data Set](https://archive.ics.uci.edu/ml/datasets/HTRU2)
+
+2. [John M. Ford, "Pulsar Search Using Supervised Machine Learning"](https://nsuworks.nova.edu/cgi/viewcontent.cgi?article=1996&context=gscis_etd)
+
+3. [R. P. Eatough, N. Molkenthin, M. Kramer, A. Noutsos, M. J. Keith,
+B. W. Stappers, and A. G. Lyne, "Selection of radio pulsar candidates using artificial neural networks"](https://arxiv.org/pdf/1005.5068.pdf) 
+
+4. [Ryan Shannon, "Pulsar Observation and Data Analysis"](http://www.atnf.csiro.au/research/radio-school/2011/talks/pulsar_observations.pdf)
+
+5. [Pulsar Timing](https://www.cv.nrao.edu/course/astr534/PulsarTiming.html)
+
+6. [Chia Min Tan, "Using Machine Learning to Search for Pulsars with LOFAR"](https://www.astron.nl/lofarscience2016/Documents/Wednesday/LSW_Tan.pdf)
+
+7. [Wikipedia: "Pulse Profiles"](https://en.wikibooks.org/wiki/Pulsars_and_neutron_stars/Pulse_profiles)
+
+8. [Pulsar dispersion band](http://astronomy.swin.edu.au/cosmos/P/Pulsar+Dispersion+Measure)
+
+9. [Ariel Goldberger, "Classifying pulsar stars using AI techniques"](https://medium.com/duke-ai-society-blog/classifying-pulsar-stars-using-ai-techniques-d2be70c0f691)
+
+10. [Kuo Liu, "Introduction to Pulsar, Pulsar Timing, and measuring of Pulse Time-of-Arrivals"](http://ipta.phys.wvu.edu/files/student-week-2017/IPTA2017_KuoLiu_pulsartiming.pdf)
+
+11. [Searching for and Identifying Pulsars](http://pulsarsearchcollaboratory.com/wp-content/uploads/2016/01/PSC_search_guide.pdf)
+
+12. [NASA: "Neutron Stars"](https://imagine.gsfc.nasa.gov/science/objects/neutron_stars1.html)
+
+13. [Wikipedia: "Pulsar"](https://en.wikipedia.org/wiki/Pulsar)
+
+14. [Pulsar Properties](https://www.cv.nrao.edu/course/astr534/Pulsars.html)
+
+15. [Duncan Lorimer ana Michael Kramer, "Handbook of Pulsar Astronomy"](https://books.google.com/books?id=OZ8tdN6qJcsC&pg=PA48&source=gbs_selected_pages&cad=3#v=onepage&q&f=false)
+
+16. [Adam Deller, "Pulsars"](https://www.strw.leidenuniv.nl/radioastronomy/lib/exe/fetch.php?media=deller-pulsars-toprint.pdf)
+
+17. [Gelu M. Nita, Aard Keimpema, Zsolt Paragi "Statistical discrimination of RFI and astronomical transients in 2-bit digitized time domain signals"](https://arxiv.org/pdf/1903.00588.pdf)
+
+18. [J.L. Han, R.N. Manchester, R.X. Xu, G.J. Qiao, "Circular polarization in pulsar integrated profiles"](https://arxiv.org/abs/astro-ph/9806021)
+
+19. [Gelu M. Nita, Dale E. Gary, Zhiwei Liu, Gordon J. Hurford, and Stephen M. White, "Radio Frequency Interference Excision Using Spectral‐Domain Statistics"](https://iopscience.iop.org/article/10.1086/520938/meta)
+
+
